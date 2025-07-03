@@ -711,9 +711,9 @@ async function getRecentActiveChats() {
         SELECT DISTINCT cc.*, pm.last_activity 
         FROM chat_configs cc
         LEFT JOIN (
-            SELECT chat_id, MAX(created_at) as last_activity
+            SELECT chat_id, MAX(processed_at) as last_activity
             FROM processed_messages 
-            WHERE created_at > $1
+            WHERE processed_at > $1
             GROUP BY chat_id
         ) pm ON cc.chat_id = pm.chat_id
         WHERE pm.last_activity IS NOT NULL OR cc.is_monitored = true
