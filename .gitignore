@@ -95,3 +95,4 @@ puppeteer-core/.local-chromium/
 
 # OS clutter
 .DS_Store
+.git_old/
