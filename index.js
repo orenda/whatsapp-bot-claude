@@ -1121,7 +1121,7 @@ client.on('message', async msg => {
 });
 
 // Add graceful shutdown handling
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
     console.log('\n🛑 Received SIGINT, shutting down gracefully...');
     if (healthCheckInterval) {
         clearInterval(healthCheckInterval);
@@ -1129,16 +1129,28 @@ process.on('SIGINT', () => {
     if (client) {
         client.destroy();
     }
+    try {
+        await pool.end();
+        console.log('✅ Database pool closed');
+    } catch (err) {
+        console.error('❌ Error closing database pool:', err.message);
+    }
     process.exit(0);
 });
 
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
     console.log('\n🛑 Received SIGTERM, shutting down gracefully...');
     if (healthCheckInterval) {
         clearInterval(healthCheckInterval);
     }
     if (client) {
         client.destroy();
+    }
+    try {
+        await pool.end();
+        console.log('✅ Database pool closed');
+    } catch (err) {
+        console.error('❌ Error closing database pool:', err.message);
     }
     process.exit(0);
 });
