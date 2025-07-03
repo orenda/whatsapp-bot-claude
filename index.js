@@ -308,12 +308,21 @@ const client = new Client({
             '--disable-web-security',
             '--disable-features=VizDisplayCompositor',
             '--disable-blink-features=AutomationControlled',
-            '--disable-extensions'
-        ]
+            '--disable-extensions',
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding',
+            '--disable-ipc-flooding-protection',
+            '--single-process'
+        ],
+        timeout: 60000,
+        protocolTimeout: 60000
     },
     // Add retry and connection options
     takeoverOnConflict: true,
-    takeoverTimeoutMs: 0
+    takeoverTimeoutMs: 0,
+    // Add session restore timeout
+    authTimeoutMs: 60000
 });
 
 // Connection management functions
@@ -347,13 +356,25 @@ async function restartConnection() {
         // Clear any existing timeouts
         clearConnectionTimeout();
         
+        // Set connection state to false during restart
+        isWhatsAppConnected = false;
+        
         // Gracefully destroy client with better error handling
         try {
             console.log('🛑 Destroying WhatsApp client...');
-            await client.destroy();
+            
+            // Wait for any pending operations to complete
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // Destroy client with timeout to prevent hanging
+            await Promise.race([
+                client.destroy(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Client destroy timeout')), 10000))
+            ]);
+            
             console.log('✅ Client destroyed successfully');
         } catch (destroyError) {
-            console.log('📝 Client cleanup completed (some errors expected)');
+            console.log('📝 Client cleanup completed (some errors expected during destroy)');
         }
         
         // Kill any remaining Chromium processes from this instance
@@ -365,11 +386,11 @@ async function restartConnection() {
             console.log('📝 Browser cleanup completed');
         }
         
-        // Clear session if multiple failures
-        if (reconnectAttempts > 1) {
+        // Clear session if multiple failures or on first connection error
+        if (reconnectAttempts >= 1) {
             const fs = require('fs');
             if (fs.existsSync('./.wwebjs_auth')) {
-                console.log('🗑️  Clearing corrupted session...');
+                console.log('🗑️  Clearing potentially corrupted session...');
                 try {
                     fs.rmSync('./.wwebjs_auth', { recursive: true, force: true });
                     console.log('✅ Session directory cleared');
@@ -387,12 +408,12 @@ async function restartConnection() {
                 client.initialize();
             } catch (initError) {
                 console.error('❌ Failed to reinitialize:', initError.message);
-                setTimeout(() => restartConnection(), 10000); // Wait longer on failure
+                setTimeout(() => restartConnection(), 15000); // Wait longer on failure
             }
-        }, 5000); // Increased delay to ensure cleanup
+        }, 8000); // Increased delay to ensure cleanup
     } catch (error) {
         console.error('❌ Error during restart:', error.message);
-        setTimeout(() => restartConnection(), 10000); // Wait longer on error
+        setTimeout(() => restartConnection(), 15000); // Wait longer on error
     }
 }
 
@@ -419,8 +440,13 @@ client.on('authenticated', (session) => {
     console.log('💾 Session will be restored on next startup');
     isWhatsAppConnected = false; // Still connecting
     
-    // Start timeout for ready event
-    startConnectionTimeout();
+    // Start timeout for ready event with longer timeout for session restore
+    connectionTimeout = setTimeout(() => {
+        if (!isWhatsAppConnected) {
+            console.log('⏰ Session restore timeout - forcing restart...');
+            restartConnection();
+        }
+    }, 240000); // 4 minutes for session restore
 });
 
 client.on('auth_failure', (msg) => {
@@ -451,31 +477,42 @@ client.on('ready', async () => {
         console.log('🆕 New session created and saved');
     }
     
-    // Get basic info about the connected account
+    // Get basic info about the connected account with retry logic
     try {
+        // Wait a bit for the connection to stabilize
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
         const info = client.info;
         console.log(`👤 Connected as: ${info.pushname} (${info.me.user})`);
         
-        // Test getting chats
+        // Test getting chats with timeout protection
         console.log('🔍 Testing chat access...');
-        const chats = await client.getChats();
+        const chats = await Promise.race([
+            client.getChats(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Chat access timeout')), 30000))
+        ]);
         console.log(`📱 Found ${chats.length} chats accessible`);
         
-        // Discover chats after a short delay
-        console.log('⏳ Starting chat discovery in 5 seconds...');
+        // Discover chats after a longer delay to ensure stability
+        console.log('⏳ Starting chat discovery in 10 seconds...');
         setTimeout(async () => {
             try {
                 console.log('🔍 Beginning chat discovery...');
-                await discoverChats();
+                await Promise.race([
+                    discoverChats(),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('Chat discovery timeout')), 45000))
+                ]);
                 await refreshMonitoredChats();
                 console.log('✅ Chat discovery completed successfully');
             } catch (error) {
                 console.error('❌ Error during initial chat discovery:', error.message);
+                console.log('🔄 Chat discovery will be retried on next restart');
             }
-        }, 5000);
+        }, 10000);
         
     } catch (error) {
         console.error('❌ Error getting account info:', error.message);
+        console.log('🔄 Will retry operations after connection stabilizes');
     }
 });
 
@@ -1120,6 +1157,27 @@ client.on('message', async msg => {
     }
 });
 
+// Add error handling for unhandled protocol errors
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+    
+    // Check if this is a protocol error that might indicate session corruption
+    if (reason && reason.message && reason.message.includes('Protocol error')) {
+        console.log('🔄 Protocol error detected, attempting restart...');
+        setTimeout(() => restartConnection(), 3000);
+    }
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+    
+    // Check if this is a protocol error that might indicate session corruption
+    if (error.message && error.message.includes('Protocol error')) {
+        console.log('🔄 Protocol error detected, attempting restart...');
+        setTimeout(() => restartConnection(), 3000);
+    }
+});
+
 // Add graceful shutdown handling
 process.on('SIGINT', async () => {
     console.log('\n🛑 Received SIGINT, shutting down gracefully...');
@@ -1127,7 +1185,11 @@ process.on('SIGINT', async () => {
         clearInterval(healthCheckInterval);
     }
     if (client) {
-        client.destroy();
+        try {
+            await client.destroy();
+        } catch (destroyError) {
+            console.log('📝 Client destruction completed with expected errors');
+        }
     }
     try {
         await pool.end();
