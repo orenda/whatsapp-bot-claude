@@ -30,10 +30,6 @@ let connectionTimeout;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 3;
 
-// Dashboard server management
-let dashboardServer = null;
-let dashboardShutdownTimer = null;
-
 // Initialize database
 async function initDatabase() {
     try {
@@ -580,10 +576,9 @@ async function isMessageProcessed(messageId) {
 
 async function markMessageProcessed(messageId, chatId, hadTaskIndicators, wasAnalyzed) {
     await pool.query(
-        `INSERT INTO processed_messages (message_id, chat_id, had_task_indicators, was_analyzed)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (message_id)
-         DO UPDATE SET had_task_indicators = $3, was_analyzed = $4, processed_at = CURRENT_TIMESTAMP`,
+        `INSERT INTO processed_messages (message_id, chat_id, had_task_indicators, was_analyzed) 
+         VALUES ($1, $2, $3, $4) 
+         ON CONFLICT (message_id) DO NOTHING`,
         [messageId, chatId, hadTaskIndicators, wasAnalyzed]
     );
 }
@@ -716,9 +711,9 @@ async function getRecentActiveChats() {
         SELECT DISTINCT cc.*, pm.last_activity 
         FROM chat_configs cc
         LEFT JOIN (
-            SELECT chat_id, MAX(processed_at) as last_activity
+            SELECT chat_id, MAX(created_at) as last_activity
             FROM processed_messages 
-            WHERE processed_at > $1
+            WHERE created_at > $1
             GROUP BY chat_id
         ) pm ON cc.chat_id = pm.chat_id
         WHERE pm.last_activity IS NOT NULL OR cc.is_monitored = true
@@ -741,88 +736,6 @@ async function refreshMonitoredChats() {
     const monitoredChats = await getMonitoredChats();
     MONITORED_CHATS = monitoredChats.map(chat => chat.chat_name);
     console.log('🔄 Updated monitored chats:', MONITORED_CHATS);
-}
-
-// Dashboard server management functions
-async function startTemporaryDashboard() {
-    const dashboardPort = process.env.DASHBOARD_PORT || 3000;
-    
-    // If server is already running, extend the shutdown timer
-    if (dashboardServer && dashboardServer.listening) {
-        console.log('📊 Dashboard server already running, extending session...');
-        clearTimeout(dashboardShutdownTimer);
-        scheduleDashboardShutdown();
-        return `http://localhost:${dashboardPort}`;
-    }
-    
-    try {
-        const dashboardApp = require('./dashboard');
-        
-        return new Promise((resolve, reject) => {
-            dashboardServer = dashboardApp.listen(dashboardPort, (error) => {
-                if (error) {
-                    console.error('❌ Failed to start dashboard server:', error.message);
-                    reject(error);
-                    return;
-                }
-                
-                console.log(`📊 Temporary dashboard started on port ${dashboardPort}`);
-                console.log('⏰ Dashboard will auto-shutdown in 6 minutes');
-                
-                // Schedule automatic shutdown
-                scheduleDashboardShutdown();
-                
-                resolve(`http://localhost:${dashboardPort}`);
-            });
-            
-            dashboardServer.on('error', (error) => {
-                if (error.code === 'EADDRINUSE') {
-                    console.error(`❌ Port ${dashboardPort} is already in use`);
-                    reject(new Error(`Port ${dashboardPort} is already in use. Try a different DASHBOARD_PORT.`));
-                } else {
-                    console.error('❌ Dashboard server error:', error.message);
-                    reject(error);
-                }
-            });
-        });
-    } catch (error) {
-        console.error('❌ Error requiring dashboard module:', error.message);
-        throw new Error('Failed to load dashboard module');
-    }
-}
-
-function scheduleDashboardShutdown() {
-    // Clear any existing timer
-    if (dashboardShutdownTimer) {
-        clearTimeout(dashboardShutdownTimer);
-    }
-    
-    // Auto-shutdown after 6 minutes (token expires in 5)
-    dashboardShutdownTimer = setTimeout(() => {
-        if (dashboardServer && dashboardServer.listening) {
-            console.log('⏰ Auto-shutting down dashboard server...');
-            dashboardServer.close(() => {
-                console.log('📊 Dashboard server shut down successfully');
-                dashboardServer = null;
-                dashboardShutdownTimer = null;
-            });
-        }
-    }, 6 * 60 * 1000); // 6 minutes
-}
-
-function shutdownDashboard() {
-    if (dashboardShutdownTimer) {
-        clearTimeout(dashboardShutdownTimer);
-        dashboardShutdownTimer = null;
-    }
-    
-    if (dashboardServer && dashboardServer.listening) {
-        console.log('🛑 Shutting down dashboard server...');
-        dashboardServer.close(() => {
-            console.log('📊 Dashboard server shut down');
-            dashboardServer = null;
-        });
-    }
 }
 
 // WhatsApp command functions
@@ -857,45 +770,80 @@ function formatTasksForWhatsApp(tasks, title = "🎯 Your Tasks") {
         return `${title}\n\nNo tasks found! 🎉`;
     }
     
+    // If this is "All Tasks", separate by status for better clarity
+    if (title.includes("All Your Tasks")) {
+        const pendingTasks = tasks.filter(t => t.status !== 'completed');
+        const completedTasks = tasks.filter(t => t.status === 'completed');
+        
+        let message = `${title}\n`;
+        message += `Total: ${tasks.length} (${pendingTasks.length} pending, ${completedTasks.length} completed)\n\n`;
+        
+        if (pendingTasks.length > 0) {
+            message += `⏳ **PENDING TASKS** (${pendingTasks.length}):\n`;
+            pendingTasks.forEach((task, index) => {
+                message += formatSingleTask(task, index + 1, false);
+            });
+            message += '\n';
+        }
+        
+        if (completedTasks.length > 0) {
+            message += `✅ **COMPLETED TASKS** (${completedTasks.length}):\n`;
+            completedTasks.forEach((task, index) => {
+                message += formatSingleTask(task, index + 1, true);
+            });
+        }
+        
+        message += `💡 Commands: /tasks /pending /completed /help`;
+        return message;
+    }
+    
+    // For specific status lists (pending/completed only), use simple format
     let message = `${title}\n`;
     message += `Total: ${tasks.length}\n\n`;
     
     tasks.forEach((task, index) => {
-        const num = index + 1;
-        const status = task.status === 'completed' ? '✅' : '⏳';
-        const types = task.task_types && task.task_types.length > 0 
-            ? task.task_types.map(t => t === 'event' ? '📅' : '💰').join('')
-            : '📝';
-        
-        message += `${num}. ${status} ${types} `;
-        
-        if (task.summary) {
-            message += `${task.summary}\n`;
-        } else {
-            message += `Task from ${task.chat_name}\n`;
-        }
-        
-        // Add chat source and details
-        const details = [];
-        details.push(`💬 ${task.chat_name}`);
-        
-        if (task.event_time) {
-            const eventDate = new Date(task.event_time);
-            details.push(`📅 ${eventDate.toLocaleDateString()} ${eventDate.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}`);
-        }
-        if (task.amount) {
-            details.push(`💰 ${task.amount}`);
-        }
-        if (task.link) {
-            details.push(`🔗 Link available`);
-        }
-        
-        message += `   ${details.join(' • ')}\n`;
-        message += `   _${formatRelativeTime(task.created_at)}_\n\n`;
+        message += formatSingleTask(task, index + 1, task.status === 'completed');
     });
     
     message += `💡 Commands: /tasks /pending /completed /help`;
     return message;
+}
+
+function formatSingleTask(task, num, isCompleted) {
+    const status = isCompleted ? '✅' : '⏳';
+    const types = task.task_types && task.task_types.length > 0 
+        ? task.task_types.map(t => t === 'event' ? '📅' : '💰').join('')
+        : '📝';
+    
+    let taskText = `${num}. ${status} ${types} `;
+    
+    if (task.summary) {
+        taskText += isCompleted ? `~${task.summary}~` : task.summary;
+    } else {
+        const taskName = `Task from ${task.chat_name}`;
+        taskText += isCompleted ? `~${taskName}~` : taskName;
+    }
+    taskText += '\n';
+    
+    // Add chat source and details
+    const details = [];
+    details.push(`💬 ${task.chat_name}`);
+    
+    if (task.event_time) {
+        const eventDate = new Date(task.event_time);
+        details.push(`📅 ${eventDate.toLocaleDateString()} ${eventDate.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}`);
+    }
+    if (task.amount) {
+        details.push(`💰 ${task.amount}`);
+    }
+    if (task.link) {
+        details.push(`🔗 Link available`);
+    }
+    
+    taskText += `   ${details.join(' • ')}\n`;
+    taskText += `   _${formatRelativeTime(task.created_at)}_\n\n`;
+    
+    return taskText;
 }
 
 function formatRelativeTime(dateString) {
@@ -919,8 +867,6 @@ function formatRelativeTime(dateString) {
 
 async function handleCommand(command, msg) {
     const userId = msg.from;
-    const chat = await msg.getChat();
-    const chatName = chat.name || 'Direct Message';
     
     try {
         switch (command.toLowerCase()) {
@@ -939,41 +885,24 @@ async function handleCommand(command, msg) {
                 
             case '/dashboard':
                 try {
-                    // Start temporary dashboard server
-                    console.log('🚀 Starting temporary dashboard server...');
-                    const dashboardUrl = await startTemporaryDashboard();
-                    
-                    // Generate dashboard token via API call to the now-running server
+                    // Generate dashboard token via API call to dashboard server
                     const dashboardPort = process.env.DASHBOARD_PORT || 3000;
                     const response = await fetch(`http://localhost:${dashboardPort}/api/generate-token`, {
                         method: 'POST'
                     });
-                    
-                    if (!response.ok) {
-                        throw new Error(`Token generation failed: ${response.status}`);
-                    }
-                    
                     const data = await response.json();
+                    
                     const expiresIn = Math.floor((data.expires - Date.now()) / 1000 / 60);
                     
                     return `📱 Mobile Dashboard Link:\n\n` +
                            `${data.url}\n\n` +
                            `⏰ Expires in ${expiresIn} minutes\n` +
-                           `🔒 Secure temporary access\n` +
-                           `🛡️ Server will auto-shutdown in 6 minutes\n\n` +
+                           `🔒 Secure temporary access\n\n` +
                            `💡 Tap the link to open on your phone!\n` +
                            `(Works on same WiFi network)`;
                 } catch (error) {
                     console.error('Dashboard link generation error:', error);
-                    
-                    // Provide more specific error messages
-                    if (error.message.includes('already in use')) {
-                        return `❌ Dashboard port is busy. Try again in a moment or change DASHBOARD_PORT in your environment.`;
-                    } else if (error.message.includes('Failed to load dashboard module')) {
-                        return `❌ Dashboard module not found. Make sure dashboard.js exists.`;
-                    } else {
-                        return `❌ Sorry, couldn't start dashboard server.\nError: ${error.message}`;
-                    }
+                    return `❌ Sorry, couldn't generate dashboard link.\nMake sure the dashboard server is running.`;
                 }
                 
             case '/chats':
@@ -1133,11 +1062,9 @@ async function handleCommand(command, msg) {
                 if ((baseCommand === '/monitor' || baseCommand === '/unmonitor') && !isNaN(chatNumber)) {
                     // Try recent chats first, then all chats
                     let chatList = await getRecentActiveChats();
-                    let listType = 'recent';
                     
                     if (chatList.length === 0 || chatNumber > chatList.length) {
                         chatList = await getAllChats();
-                        listType = 'all';
                     }
                     
                     if (chatNumber < 1 || chatNumber > chatList.length) {
@@ -1261,43 +1188,14 @@ client.on('message', async msg => {
     }
 });
 
-// Add error handling for unhandled protocol errors
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
-    
-    // Check if this is a protocol error that might indicate session corruption
-    if (reason && reason.message && reason.message.includes('Protocol error')) {
-        console.log('🔄 Protocol error detected, attempting restart...');
-        setTimeout(() => restartConnection(), 3000);
-    }
-});
-
-process.on('uncaughtException', (error) => {
-    console.error('❌ Uncaught Exception:', error);
-    
-    // Check if this is a protocol error that might indicate session corruption
-    if (error.message && error.message.includes('Protocol error')) {
-        console.log('🔄 Protocol error detected, attempting restart...');
-        setTimeout(() => restartConnection(), 3000);
-    }
-});
-
 // Add graceful shutdown handling
 process.on('SIGINT', async () => {
     console.log('\n🛑 Received SIGINT, shutting down gracefully...');
     if (healthCheckInterval) {
         clearInterval(healthCheckInterval);
     }
-    
-    // Shutdown dashboard server if running
-    shutdownDashboard();
-    
     if (client) {
-        try {
-            await client.destroy();
-        } catch (destroyError) {
-            console.log('📝 Client destruction completed with expected errors');
-        }
+        client.destroy();
     }
     try {
         await pool.end();
@@ -1313,10 +1211,6 @@ process.on('SIGTERM', async () => {
     if (healthCheckInterval) {
         clearInterval(healthCheckInterval);
     }
-    
-    // Shutdown dashboard server if running
-    shutdownDashboard();
-    
     if (client) {
         client.destroy();
     }
