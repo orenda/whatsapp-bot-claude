@@ -265,6 +265,13 @@
     </div>
 
     <script>
+        const urlParams = new URLSearchParams(window.location.search);
+        const token = urlParams.get('token');
+
+        if (!token) {
+            document.body.innerHTML = '<div style="text-align:center;padding:50px;color:#666;">Invalid access. Please use the link from WhatsApp.</div>';
+        }
+
         let tasks = [];
         
         async function loadTasks() {
@@ -272,7 +279,7 @@
                 document.getElementById('loading').style.display = 'block';
                 document.getElementById('error').style.display = 'none';
                 
-                const response = await fetch('/api/tasks');
+                const response = await fetch(`/api/tasks?token=${token}`);
                 if (!response.ok) throw new Error('Failed to fetch tasks');
                 
                 tasks = await response.json();
@@ -353,7 +360,7 @@
         
         async function markComplete(taskId) {
             try {
-                const response = await fetch(`/api/tasks/${taskId}/complete`, {
+                const response = await fetch(`/api/tasks/${taskId}/complete?token=${token}`, {
                     method: 'POST'
                 });
                 
@@ -378,7 +385,7 @@
             if (!confirm('Are you sure you want to delete this task?')) return;
             
             try {
-                const response = await fetch(`/api/tasks/${taskId}`, {
+                const response = await fetch(`/api/tasks/${taskId}?token=${token}`, {
                     method: 'DELETE'
                 });
                 
