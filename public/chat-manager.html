@@ -299,8 +299,8 @@
         
         <div class="content">
             <div class="nav-buttons">
-                <button class="nav-btn active" onclick="showAllChats()">All Chats</button>
-                <button class="nav-btn" onclick="showTasks()">Tasks</button>
+                <button class="nav-btn active" onclick="showAllChats(event)">All Chats</button>
+                <button class="nav-btn" onclick="showTasks(event)">Tasks</button>
             </div>
             
             <div id="success-message" class="success-message" style="display: none;"></div>
@@ -456,16 +456,16 @@
             }
         }
         
-        function showAllChats() {
+        function showAllChats(evt) {
             document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
+            evt.target.classList.add('active');
             document.getElementById('chat-section').style.display = 'block';
             document.getElementById('task-section').style.display = 'none';
         }
-        
-        function showTasks() {
+
+        function showTasks(evt) {
             document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
+            evt.target.classList.add('active');
             document.getElementById('chat-section').style.display = 'none';
             document.getElementById('task-section').style.display = 'block';
             renderTasks();
