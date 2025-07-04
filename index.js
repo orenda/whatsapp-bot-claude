@@ -30,6 +30,10 @@ let connectionTimeout;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 3;
 
+// Dashboard server management
+let dashboardServer = null;
+let dashboardShutdownTimer = null;
+
 // Initialize database
 async function initDatabase() {
     try {
@@ -739,6 +743,88 @@ async function refreshMonitoredChats() {
     console.log('🔄 Updated monitored chats:', MONITORED_CHATS);
 }
 
+// Dashboard server management functions
+async function startTemporaryDashboard() {
+    const dashboardPort = process.env.DASHBOARD_PORT || 3000;
+    
+    // If server is already running, extend the shutdown timer
+    if (dashboardServer && dashboardServer.listening) {
+        console.log('📊 Dashboard server already running, extending session...');
+        clearTimeout(dashboardShutdownTimer);
+        scheduleDashboardShutdown();
+        return `http://localhost:${dashboardPort}`;
+    }
+    
+    try {
+        const dashboardApp = require('./dashboard');
+        
+        return new Promise((resolve, reject) => {
+            dashboardServer = dashboardApp.listen(dashboardPort, (error) => {
+                if (error) {
+                    console.error('❌ Failed to start dashboard server:', error.message);
+                    reject(error);
+                    return;
+                }
+                
+                console.log(`📊 Temporary dashboard started on port ${dashboardPort}`);
+                console.log('⏰ Dashboard will auto-shutdown in 6 minutes');
+                
+                // Schedule automatic shutdown
+                scheduleDashboardShutdown();
+                
+                resolve(`http://localhost:${dashboardPort}`);
+            });
+            
+            dashboardServer.on('error', (error) => {
+                if (error.code === 'EADDRINUSE') {
+                    console.error(`❌ Port ${dashboardPort} is already in use`);
+                    reject(new Error(`Port ${dashboardPort} is already in use. Try a different DASHBOARD_PORT.`));
+                } else {
+                    console.error('❌ Dashboard server error:', error.message);
+                    reject(error);
+                }
+            });
+        });
+    } catch (error) {
+        console.error('❌ Error requiring dashboard module:', error.message);
+        throw new Error('Failed to load dashboard module');
+    }
+}
+
+function scheduleDashboardShutdown() {
+    // Clear any existing timer
+    if (dashboardShutdownTimer) {
+        clearTimeout(dashboardShutdownTimer);
+    }
+    
+    // Auto-shutdown after 6 minutes (token expires in 5)
+    dashboardShutdownTimer = setTimeout(() => {
+        if (dashboardServer && dashboardServer.listening) {
+            console.log('⏰ Auto-shutting down dashboard server...');
+            dashboardServer.close(() => {
+                console.log('📊 Dashboard server shut down successfully');
+                dashboardServer = null;
+                dashboardShutdownTimer = null;
+            });
+        }
+    }, 6 * 60 * 1000); // 6 minutes
+}
+
+function shutdownDashboard() {
+    if (dashboardShutdownTimer) {
+        clearTimeout(dashboardShutdownTimer);
+        dashboardShutdownTimer = null;
+    }
+    
+    if (dashboardServer && dashboardServer.listening) {
+        console.log('🛑 Shutting down dashboard server...');
+        dashboardServer.close(() => {
+            console.log('📊 Dashboard server shut down');
+            dashboardServer = null;
+        });
+    }
+}
+
 // WhatsApp command functions
 function isCommand(text) {
     return text.startsWith('/');
@@ -853,24 +939,41 @@ async function handleCommand(command, msg) {
                 
             case '/dashboard':
                 try {
-                    // Generate dashboard token via API call to dashboard server
+                    // Start temporary dashboard server
+                    console.log('🚀 Starting temporary dashboard server...');
+                    const dashboardUrl = await startTemporaryDashboard();
+                    
+                    // Generate dashboard token via API call to the now-running server
                     const dashboardPort = process.env.DASHBOARD_PORT || 3000;
                     const response = await fetch(`http://localhost:${dashboardPort}/api/generate-token`, {
                         method: 'POST'
                     });
-                    const data = await response.json();
                     
+                    if (!response.ok) {
+                        throw new Error(`Token generation failed: ${response.status}`);
+                    }
+                    
+                    const data = await response.json();
                     const expiresIn = Math.floor((data.expires - Date.now()) / 1000 / 60);
                     
                     return `📱 Mobile Dashboard Link:\n\n` +
                            `${data.url}\n\n` +
                            `⏰ Expires in ${expiresIn} minutes\n` +
-                           `🔒 Secure temporary access\n\n` +
+                           `🔒 Secure temporary access\n` +
+                           `🛡️ Server will auto-shutdown in 6 minutes\n\n` +
                            `💡 Tap the link to open on your phone!\n` +
                            `(Works on same WiFi network)`;
                 } catch (error) {
                     console.error('Dashboard link generation error:', error);
-                    return `❌ Sorry, couldn't generate dashboard link.\nMake sure the dashboard server is running.`;
+                    
+                    // Provide more specific error messages
+                    if (error.message.includes('already in use')) {
+                        return `❌ Dashboard port is busy. Try again in a moment or change DASHBOARD_PORT in your environment.`;
+                    } else if (error.message.includes('Failed to load dashboard module')) {
+                        return `❌ Dashboard module not found. Make sure dashboard.js exists.`;
+                    } else {
+                        return `❌ Sorry, couldn't start dashboard server.\nError: ${error.message}`;
+                    }
                 }
                 
             case '/chats':
@@ -1185,6 +1288,10 @@ process.on('SIGINT', async () => {
     if (healthCheckInterval) {
         clearInterval(healthCheckInterval);
     }
+    
+    // Shutdown dashboard server if running
+    shutdownDashboard();
+    
     if (client) {
         try {
             await client.destroy();
@@ -1206,6 +1313,10 @@ process.on('SIGTERM', async () => {
     if (healthCheckInterval) {
         clearInterval(healthCheckInterval);
     }
+    
+    // Shutdown dashboard server if running
+    shutdownDashboard();
+    
     if (client) {
         client.destroy();
     }
