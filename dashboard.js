@@ -98,6 +98,23 @@ function validateToken(req, res, next) {
 app.use('/dashboard', validateToken);
 app.use(express.static('public'));
 
+// API endpoint to generate dashboard token (for WhatsApp bot to call)
+app.post('/api/generate-token', (req, res) => {
+    const token = generateDashboardToken();
+    const localIP = getLocalIPAddress();
+    const port = process.env.DASHBOARD_PORT || 3000;
+    const dashboardUrl = `http://${localIP}:${port}/chat-manager?token=${token}`;
+
+    res.json({
+        token,
+        url: dashboardUrl,
+        expires: Date.now() + TOKEN_EXPIRY_MS
+    });
+});
+
+// Apply token validation to all other API routes
+app.use('/api', validateToken);
+
 // PostgreSQL connection (same as main bot)
 const pool = new Pool({
     user: process.env.DB_USER || 'whatsapp_bot',
@@ -203,20 +220,6 @@ app.get('/', (req, res) => {
     }
 });
 
-// API endpoint to generate dashboard token (for WhatsApp bot to call)
-app.post('/api/generate-token', (req, res) => {
-    const token = generateDashboardToken();
-    const localIP = getLocalIPAddress();
-    const port = process.env.DASHBOARD_PORT || 3000;
-    const dashboardUrl = `http://${localIP}:${port}/chat-manager?token=${token}`;
-    
-    res.json({ 
-        token, 
-        url: dashboardUrl,
-        expires: Date.now() + TOKEN_EXPIRY_MS
-    });
-});
-
 // Chat management API endpoints
 app.get('/api/chats', async (req, res) => {
     try {
@@ -266,6 +269,11 @@ app.get('/chat-manager', (req, res) => {
 });
 
 const PORT = process.env.DASHBOARD_PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`📊 Dashboard running at http://localhost:${PORT}`);
-});
+
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`📊 Dashboard running at http://localhost:${PORT}`);
+    });
+}
+
+module.exports = app;
