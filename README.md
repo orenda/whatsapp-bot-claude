@@ -245,3 +245,5 @@ For issues and feature requests, please check:
 2. Bot logs for error messages  
 3. Health check output for system status
 4. Database connectivity and schema
+
+If the above steps do not resolve your problem or you have a feature request, please open an issue on GitHub with relevant logs and a clear description.
