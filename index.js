@@ -576,9 +576,10 @@ async function isMessageProcessed(messageId) {
 
 async function markMessageProcessed(messageId, chatId, hadTaskIndicators, wasAnalyzed) {
     await pool.query(
-        `INSERT INTO processed_messages (message_id, chat_id, had_task_indicators, was_analyzed) 
-         VALUES ($1, $2, $3, $4) 
-         ON CONFLICT (message_id) DO NOTHING`,
+        `INSERT INTO processed_messages (message_id, chat_id, had_task_indicators, was_analyzed)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (message_id)
+         DO UPDATE SET had_task_indicators = $3, was_analyzed = $4, processed_at = CURRENT_TIMESTAMP`,
         [messageId, chatId, hadTaskIndicators, wasAnalyzed]
     );
 }
