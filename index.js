@@ -1188,6 +1188,27 @@ client.on('message', async msg => {
     }
 });
 
+// Add error handling for unhandled protocol errors
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Unhandled Rejection at:', promise, 'reason:', reason);
+    
+    // Check if this is a protocol error that might indicate session corruption
+    if (reason && reason.message && reason.message.includes('Protocol error')) {
+        console.log('🔄 Protocol error detected, attempting restart...');
+        setTimeout(() => restartConnection(), 3000);
+    }
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+    
+    // Check if this is a protocol error that might indicate session corruption
+    if (error.message && error.message.includes('Protocol error')) {
+        console.log('🔄 Protocol error detected, attempting restart...');
+        setTimeout(() => restartConnection(), 3000);
+    }
+});
+
 // Add graceful shutdown handling
 process.on('SIGINT', async () => {
     console.log('\n🛑 Received SIGINT, shutting down gracefully...');
@@ -1195,7 +1216,11 @@ process.on('SIGINT', async () => {
         clearInterval(healthCheckInterval);
     }
     if (client) {
-        client.destroy();
+        try {
+            await client.destroy();
+        } catch (destroyError) {
+            console.log('📝 Client destruction completed with expected errors');
+        }
     }
     try {
         await pool.end();
@@ -1212,7 +1237,11 @@ process.on('SIGTERM', async () => {
         clearInterval(healthCheckInterval);
     }
     if (client) {
-        client.destroy();
+        try {
+            await client.destroy();
+        } catch (destroyError) {
+            console.log('📝 Client destruction completed with expected errors');
+        }
     }
     try {
         await pool.end();
