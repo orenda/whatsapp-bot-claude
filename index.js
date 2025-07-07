@@ -12,9 +12,9 @@ let MONITORED_CHATS = process.env.MONITORED_CHATS?.split(',') || ['Test Group'];
 const BOT_COMMAND_CHAT = process.env.BOT_COMMAND_CHAT || 'Bot Commands';
 const MAX_MESSAGE_HISTORY_DAYS = parseInt(process.env.MAX_MESSAGE_HISTORY_DAYS) || 3;
 const MESSAGE_FETCH_LIMIT = parseInt(process.env.MESSAGE_FETCH_LIMIT) || 50;
-
 // Store discovered chats for management
 let discoveredChats = new Map();
+
 
 // PostgreSQL connection
 const pool = new Pool({
@@ -665,8 +665,6 @@ async function discoverChats() {
                 participantCount: chat.isGroup ? (chat.participants ? chat.participants.length : 0) : 1
             };
             
-            discoveredChats.set(chat.id._serialized, chatInfo);
-            
             // Save to database
             await saveChatConfig(chatInfo);
         }
@@ -697,12 +695,6 @@ async function saveChatConfig(chatInfo) {
     `, [chatInfo.id, chatInfo.name, isCurrentlyMonitored, chatInfo.isGroup, chatInfo.participantCount]);
 }
 
-async function getMonitoredChats() {
-    const result = await pool.query(
-        'SELECT chat_id, chat_name FROM chat_configs WHERE is_monitored = true ORDER BY chat_name'
-    );
-    return result.rows;
-}
 
 async function getAllChats() {
     const result = await pool.query(
@@ -1432,7 +1424,7 @@ async function promptChatSelection(chats) {
     });
 }
 
-async function processchatSelection(selection, chats) {
+async function processChatSelection(selection, chats) {
     let selectedChats = [];
     
     if (selection === 'skip') {
@@ -1505,7 +1497,7 @@ async function runChatSelectionInit() {
     
     // Prompt user for selection
     const selection = await promptChatSelection(chatList);
-    const result = await processchatSelection(selection, chatList);
+    const result = await processChatSelection(selection, chatList);
     
     // Save configuration
     await saveChatSelectionConfig({
