@@ -696,12 +696,6 @@ async function saveChatConfig(chatInfo) {
     `, [chatInfo.id, chatInfo.name, isCurrentlyMonitored, chatInfo.isGroup, chatInfo.participantCount]);
 }
 
-async function getMonitoredChats() {
-    const result = await pool.query(
-        'SELECT chat_id, chat_name FROM chat_configs WHERE is_monitored = true ORDER BY chat_name'
-    );
-    return result.rows;
-}
 
 async function getAllChats() {
     const result = await pool.query(
