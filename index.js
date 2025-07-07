@@ -11,10 +11,6 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 let MONITORED_CHATS = process.env.MONITORED_CHATS?.split(',') || ['Test Group'];
 const BOT_COMMAND_CHAT = process.env.BOT_COMMAND_CHAT || 'Bot Commands';
 const MAX_MESSAGE_HISTORY_DAYS = parseInt(process.env.MAX_MESSAGE_HISTORY_DAYS) || 3;
-
-// Store discovered chats for management
-let discoveredChats = new Map();
-
 // PostgreSQL connection
 const pool = new Pool({
     user: process.env.DB_USER || 'whatsapp_bot',
@@ -663,8 +659,6 @@ async function discoverChats() {
                 isGroup: chat.isGroup,
                 participantCount: chat.isGroup ? (chat.participants ? chat.participants.length : 0) : 1
             };
-            
-            discoveredChats.set(chat.id._serialized, chatInfo);
             
             // Save to database
             await saveChatConfig(chatInfo);
