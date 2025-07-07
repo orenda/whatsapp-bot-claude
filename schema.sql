@@ -43,6 +43,26 @@ CREATE TABLE IF NOT EXISTS chat_configs (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Table for storing bot session information (single user)
+CREATE TABLE IF NOT EXISTS bot_sessions (
+    id SERIAL PRIMARY KEY,
+    login_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    last_read_timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Table for storing chat selection configuration
+CREATE TABLE IF NOT EXISTS chat_selection_config (
+    id SERIAL PRIMARY KEY,
+    is_initialized BOOLEAN DEFAULT false,
+    total_chats_discovered INTEGER DEFAULT 0,
+    monitored_chats_count INTEGER DEFAULT 0,
+    last_init_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_tasks_message_id ON tasks(message_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_chat_id ON tasks(chat_id);
@@ -51,3 +71,5 @@ CREATE INDEX IF NOT EXISTS idx_processed_messages_message_id ON processed_messag
 CREATE INDEX IF NOT EXISTS idx_processed_messages_chat_id ON processed_messages(chat_id);
 CREATE INDEX IF NOT EXISTS idx_chat_configs_chat_id ON chat_configs(chat_id);
 CREATE INDEX IF NOT EXISTS idx_chat_configs_monitored ON chat_configs(is_monitored);
+CREATE INDEX IF NOT EXISTS idx_bot_sessions_login_timestamp ON bot_sessions(login_timestamp);
+CREATE INDEX IF NOT EXISTS idx_bot_sessions_last_read_timestamp ON bot_sessions(last_read_timestamp);

@@ -5,10 +5,12 @@ const OpenAI = require('openai');
 const fs = require('fs').promises;
 const { Pool } = require('pg');
 const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+const readline = require('readline');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 let MONITORED_CHATS = process.env.MONITORED_CHATS?.split(',') || ['Test Group'];
 const BOT_COMMAND_CHAT = process.env.BOT_COMMAND_CHAT || 'Bot Commands';
+const MAX_MESSAGE_HISTORY_DAYS = parseInt(process.env.MAX_MESSAGE_HISTORY_DAYS) || 3;
 
 // Store discovered chats for management
 let discoveredChats = new Map();
@@ -504,6 +506,9 @@ client.on('ready', async () => {
                 ]);
                 await refreshMonitoredChats();
                 console.log('✅ Chat discovery completed successfully');
+                
+                // Run chat selection initialization
+                await checkAndRunInitialization();
             } catch (error) {
                 console.error('❌ Error during initial chat discovery:', error.message);
                 console.log('🔄 Chat discovery will be retried on next restart');
@@ -1032,6 +1037,75 @@ async function handleCommand(command, msg) {
                        `🤖 Monitored Chats: ${MONITORED_CHATS.join(', ')}\n` +
                        `📱 Command Chat: ${BOT_COMMAND_CHAT}`;
                 
+            case '/read_unread':
+                try {
+                    const parts = command.split(' ');
+                    let maxDays = MAX_MESSAGE_HISTORY_DAYS;
+                    
+                    if (parts.length > 1) {
+                        const userDays = parseInt(parts[1]);
+                        if (!isNaN(userDays) && userDays > 0) {
+                            maxDays = userDays;
+                        }
+                    }
+                    
+                    const unreadMessages = await getUnreadMessages(maxDays);
+                    return formatUnreadMessages(unreadMessages);
+                } catch (error) {
+                    console.error('Error reading unread messages:', error);
+                    return `❌ Error reading unread messages: ${error.message}`;
+                }
+                
+            case '/mark_read':
+                try {
+                    await updateLastReadTimestamp();
+                    return `✅ All messages marked as read!\n📅 Last read timestamp updated to now.`;
+                } catch (error) {
+                    console.error('Error marking messages as read:', error);
+                    return `❌ Error marking messages as read: ${error.message}`;
+                }
+                
+            case '/status':
+                try {
+                    const sessionResult = await pool.query('SELECT * FROM bot_sessions LIMIT 1');
+                    const configResult = await pool.query('SELECT * FROM chat_selection_config LIMIT 1');
+                    
+                    if (sessionResult.rows.length === 0) {
+                        return `❌ No bot session found. Please restart the bot.`;
+                    }
+                    
+                    const session = sessionResult.rows[0];
+                    const config = configResult.rows[0];
+                    
+                    const loginTime = new Date(session.login_timestamp);
+                    const lastReadTime = new Date(session.last_read_timestamp);
+                    const now = new Date();
+                    
+                    const uptimeMs = now - loginTime;
+                    const uptimeHours = Math.floor(uptimeMs / (1000 * 60 * 60));
+                    const uptimeMinutes = Math.floor((uptimeMs % (1000 * 60 * 60)) / (1000 * 60));
+                    
+                    const timeSinceLastRead = now - lastReadTime;
+                    const hoursSinceLastRead = Math.floor(timeSinceLastRead / (1000 * 60 * 60));
+                    const minutesSinceLastRead = Math.floor((timeSinceLastRead % (1000 * 60 * 60)) / (1000 * 60));
+                    
+                    return `🤖 BOT STATUS\n` +
+                           `════════════════════════════════\n` +
+                           `⏰ Bot Login: ${loginTime.toLocaleString()}\n` +
+                           `📈 Uptime: ${uptimeHours}h ${uptimeMinutes}m\n` +
+                           `📖 Last Read: ${lastReadTime.toLocaleString()}\n` +
+                           `⏱️  Since Last Read: ${hoursSinceLastRead}h ${minutesSinceLastRead}m\n` +
+                           `🔧 Max History Days: ${MAX_MESSAGE_HISTORY_DAYS}\n\n` +
+                           `📊 Chat Configuration:\n` +
+                           `• Initialized: ${config ? (config.is_initialized ? '✅ Yes' : '❌ No') : '❌ No'}\n` +
+                           `• Total Chats: ${config ? config.total_chats_discovered : 0}\n` +
+                           `• Monitored: ${config ? config.monitored_chats_count : 0}\n` +
+                           `• Last Init: ${config?.last_init_at ? new Date(config.last_init_at).toLocaleString() : 'Never'}`;
+                } catch (error) {
+                    console.error('Error getting bot status:', error);
+                    return `❌ Error getting bot status: ${error.message}`;
+                }
+                
             case '/help':
                 return `🤖 WhatsApp Task Bot Commands\n\n` +
                        `📋 Task Commands:\n` +
@@ -1039,6 +1113,10 @@ async function handleCommand(command, msg) {
                        `/pending - Show pending tasks\n` +
                        `/completed - Show completed tasks\n` +
                        `/stats - Show global task statistics\n\n` +
+                       `📨 Message History:\n` +
+                       `/read_unread [days] - Show unread messages since last read\n` +
+                       `/mark_read - Mark all messages as read\n` +
+                       `/status - Show bot status and uptime\n\n` +
                        `📱 Dashboard & Chat Management:\n` +
                        `/dashboard - Get mobile dashboard link\n` +
                        `/chats - Show recent active chats (last 7 days)\n` +
@@ -1049,7 +1127,8 @@ async function handleCommand(command, msg) {
                        `/refresh - Refresh chat list\n\n` +
                        `🏗️ Setup:\n` +
                        `• Task Detection: ${MONITORED_CHATS.join(', ')}\n` +
-                       `• Commands: ${BOT_COMMAND_CHAT} (this chat)\n\n` +
+                       `• Commands: ${BOT_COMMAND_CHAT} (this chat)\n` +
+                       `• Max History: ${MAX_MESSAGE_HISTORY_DAYS} days\n\n` +
                        `ℹ️ The bot detects tasks from monitored chats.\n` +
                        `Use this dedicated chat for commands to avoid spam.`;
                 
@@ -1252,9 +1331,384 @@ process.on('SIGTERM', async () => {
     process.exit(0);
 });
 
+// Database functions for bot sessions and configuration
+async function initBotSession() {
+    try {
+        // Check if bot session exists
+        const sessionResult = await pool.query('SELECT * FROM bot_sessions LIMIT 1');
+        
+        if (sessionResult.rows.length === 0) {
+            // Create initial session
+            await pool.query(`
+                INSERT INTO bot_sessions (login_timestamp, last_read_timestamp)
+                VALUES (NOW(), NOW())
+            `);
+            console.log('✅ Bot session initialized');
+        } else {
+            // Update login timestamp
+            await pool.query(`
+                UPDATE bot_sessions 
+                SET login_timestamp = NOW(), updated_at = NOW()
+                WHERE id = $1
+            `, [sessionResult.rows[0].id]);
+            console.log('✅ Bot session updated');
+        }
+    } catch (error) {
+        console.error('❌ Error initializing bot session:', error.message);
+        throw error;
+    }
+}
+
+async function getChatSelectionConfig() {
+    try {
+        const result = await pool.query('SELECT * FROM chat_selection_config LIMIT 1');
+        return result.rows[0] || null;
+    } catch (error) {
+        console.error('❌ Error getting chat selection config:', error.message);
+        return null;
+    }
+}
+
+async function saveChatSelectionConfig(config) {
+    try {
+        const existingConfig = await getChatSelectionConfig();
+        
+        if (existingConfig) {
+            await pool.query(`
+                UPDATE chat_selection_config 
+                SET is_initialized = $1, 
+                    total_chats_discovered = $2, 
+                    monitored_chats_count = $3,
+                    last_init_at = NOW(),
+                    updated_at = NOW()
+                WHERE id = $4
+            `, [config.is_initialized, config.total_chats_discovered, config.monitored_chats_count, existingConfig.id]);
+        } else {
+            await pool.query(`
+                INSERT INTO chat_selection_config (is_initialized, total_chats_discovered, monitored_chats_count, last_init_at)
+                VALUES ($1, $2, $3, NOW())
+            `, [config.is_initialized, config.total_chats_discovered, config.monitored_chats_count]);
+        }
+        
+        console.log('✅ Chat selection config saved');
+    } catch (error) {
+        console.error('❌ Error saving chat selection config:', error.message);
+        throw error;
+    }
+}
+
+function createReadlineInterface() {
+    return readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
+}
+
+async function promptChatSelection(chats) {
+    const rl = createReadlineInterface();
+    
+    console.log('\n🔧 CHAT SELECTION SETUP');
+    console.log('════════════════════════');
+    console.log('Available chats:');
+    
+    chats.forEach((chat, index) => {
+        const type = chat.isGroup ? '👥 Group' : '👤 Individual';
+        const participants = chat.isGroup ? ` (${chat.participantCount} members)` : '';
+        console.log(`${index + 1}. ${type}: ${chat.name}${participants}`);
+    });
+    
+    console.log('\n📋 Options:');
+    console.log('• Enter numbers separated by commas (e.g., 1,3,5) to select specific chats');
+    console.log('• Enter "all" to monitor all chats');
+    console.log('• Enter "skip" to keep current settings');
+    console.log('• Enter "groups" to monitor only group chats');
+    
+    return new Promise((resolve) => {
+        rl.question('\n👉 Your choice: ', (answer) => {
+            rl.close();
+            resolve(answer.trim().toLowerCase());
+        });
+    });
+}
+
+async function processchatSelection(selection, chats) {
+    let selectedChats = [];
+    
+    if (selection === 'skip') {
+        console.log('⏭️  Keeping current chat settings');
+        return { skip: true };
+    } else if (selection === 'all') {
+        selectedChats = chats;
+    } else if (selection === 'groups') {
+        selectedChats = chats.filter(chat => chat.isGroup);
+    } else {
+        // Parse comma-separated numbers
+        const numbers = selection.split(',').map(n => parseInt(n.trim())).filter(n => !isNaN(n) && n > 0 && n <= chats.length);
+        selectedChats = numbers.map(n => chats[n - 1]);
+    }
+    
+    if (selectedChats.length === 0) {
+        console.log('❌ No valid chats selected, keeping current settings');
+        return { skip: true };
+    }
+    
+    // Update chat configurations in database
+    try {
+        // First, set all chats to not monitored
+        await pool.query('UPDATE chat_configs SET is_monitored = false');
+        
+        // Then enable monitoring for selected chats
+        for (const chat of selectedChats) {
+            await pool.query(`
+                UPDATE chat_configs 
+                SET is_monitored = true, updated_at = NOW()
+                WHERE chat_id = $1
+            `, [chat.id]);
+        }
+        
+        console.log(`✅ Updated monitoring for ${selectedChats.length} chats:`);
+        selectedChats.forEach(chat => {
+            const type = chat.isGroup ? '👥' : '👤';
+            console.log(`   ${type} ${chat.name}`);
+        });
+        
+        return { 
+            skip: false, 
+            selected: selectedChats,
+            count: selectedChats.length
+        };
+    } catch (error) {
+        console.error('❌ Error updating chat configurations:', error.message);
+        return { skip: true };
+    }
+}
+
+async function runChatSelectionInit() {
+    console.log('\n🔍 Discovering available chats...');
+    
+    // Wait for WhatsApp to be ready and discover chats
+    const chats = await client.getChats();
+    const chatList = chats.map(chat => ({
+        id: chat.id._serialized,
+        name: chat.name || 'Unknown',
+        isGroup: chat.isGroup,
+        participantCount: chat.isGroup ? (chat.participants ? chat.participants.length : 0) : 1
+    }));
+    
+    console.log(`📊 Found ${chatList.length} chats`);
+    
+    // Save all discovered chats to database
+    for (const chat of chatList) {
+        await saveChatConfig(chat);
+    }
+    
+    // Prompt user for selection
+    const selection = await promptChatSelection(chatList);
+    const result = await processchatSelection(selection, chatList);
+    
+    // Save configuration
+    await saveChatSelectionConfig({
+        is_initialized: true,
+        total_chats_discovered: chatList.length,
+        monitored_chats_count: result.skip ? 0 : result.count
+    });
+    
+    return result;
+}
+
+async function checkAndRunInitialization() {
+    const config = await getChatSelectionConfig();
+    
+    if (!config || !config.is_initialized) {
+        console.log('\n🆕 First time setup detected');
+        console.log('🔧 Starting chat selection initialization...');
+        
+        // Wait for WhatsApp client to be ready
+        await new Promise(resolve => {
+            if (client.info) {
+                resolve();
+            } else {
+                client.once('ready', resolve);
+            }
+        });
+        
+        await runChatSelectionInit();
+    } else {
+        console.log('✅ Chat selection already configured');
+        console.log(`📊 Monitoring ${config.monitored_chats_count} out of ${config.total_chats_discovered} chats`);
+    }
+}
+
+// Message history retrieval functions
+async function getLastReadTimestamp() {
+    try {
+        const result = await pool.query('SELECT last_read_timestamp FROM bot_sessions LIMIT 1');
+        return result.rows[0]?.last_read_timestamp || null;
+    } catch (error) {
+        console.error('❌ Error getting last read timestamp:', error.message);
+        return null;
+    }
+}
+
+async function updateLastReadTimestamp() {
+    try {
+        await pool.query(`
+            UPDATE bot_sessions 
+            SET last_read_timestamp = NOW(), updated_at = NOW()
+            WHERE id = (SELECT id FROM bot_sessions LIMIT 1)
+        `);
+        console.log('✅ Last read timestamp updated');
+    } catch (error) {
+        console.error('❌ Error updating last read timestamp:', error.message);
+        throw error;
+    }
+}
+
+async function getMonitoredChats() {
+    try {
+        const result = await pool.query(`
+            SELECT chat_id, chat_name, is_group, participant_count 
+            FROM chat_configs 
+            WHERE is_monitored = true
+            ORDER BY chat_name
+        `);
+        return result.rows;
+    } catch (error) {
+        console.error('❌ Error getting monitored chats:', error.message);
+        return [];
+    }
+}
+
+async function getMessagesFromChat(chatId, fromTimestamp, maxDays = null) {
+    try {
+        const chat = await client.getChatById(chatId);
+        if (!chat) {
+            console.log(`⚠️  Chat not found: ${chatId}`);
+            return [];
+        }
+        
+        // Calculate the earliest timestamp based on max days limit
+        let earliestTimestamp = fromTimestamp;
+        if (maxDays) {
+            const maxDaysAgo = new Date(Date.now() - (maxDays * 24 * 60 * 60 * 1000));
+            if (fromTimestamp && fromTimestamp < maxDaysAgo) {
+                earliestTimestamp = maxDaysAgo;
+            }
+        }
+        
+        // Fetch messages with a reasonable limit
+        const messages = await chat.fetchMessages({ limit: 50 });
+        
+        // Filter messages by timestamp
+        const filteredMessages = messages.filter(msg => {
+            const messageDate = new Date(msg.timestamp * 1000);
+            return messageDate >= earliestTimestamp;
+        });
+        
+        // Format messages for display
+        return filteredMessages.map(msg => ({
+            id: msg.id._serialized,
+            timestamp: new Date(msg.timestamp * 1000),
+            from: msg.from,
+            author: msg.author || msg.from,
+            body: msg.body || '[Media/Other]',
+            type: msg.type,
+            isGroup: !!msg.author,
+            hasMedia: msg.hasMedia,
+            chatId: chatId
+        }));
+        
+    } catch (error) {
+        console.error(`❌ Error fetching messages from chat ${chatId}:`, error.message);
+        return [];
+    }
+}
+
+async function getUnreadMessages(maxDays = null) {
+    try {
+        const lastReadTimestamp = await getLastReadTimestamp();
+        if (!lastReadTimestamp) {
+            console.log('⚠️  No last read timestamp found, initializing...');
+            await updateLastReadTimestamp();
+            return [];
+        }
+        
+        const monitoredChats = await getMonitoredChats();
+        if (monitoredChats.length === 0) {
+            console.log('⚠️  No monitored chats found');
+            return [];
+        }
+        
+        console.log(`📖 Fetching messages since ${lastReadTimestamp.toLocaleString()}`);
+        console.log(`🔍 Checking ${monitoredChats.length} monitored chats...`);
+        
+        const allMessages = [];
+        
+        for (const chatConfig of monitoredChats) {
+            console.log(`   📱 Checking ${chatConfig.chat_name}...`);
+            const messages = await getMessagesFromChat(chatConfig.chat_id, lastReadTimestamp, maxDays);
+            
+            if (messages.length > 0) {
+                console.log(`   ✅ Found ${messages.length} messages in ${chatConfig.chat_name}`);
+                allMessages.push({
+                    chatName: chatConfig.chat_name,
+                    chatId: chatConfig.chat_id,
+                    isGroup: chatConfig.is_group,
+                    messages: messages
+                });
+            }
+        }
+        
+        return allMessages;
+        
+    } catch (error) {
+        console.error('❌ Error getting unread messages:', error.message);
+        return [];
+    }
+}
+
+function formatUnreadMessages(chatMessages) {
+    if (!chatMessages || chatMessages.length === 0) {
+        return '📭 No unread messages found';
+    }
+    
+    let output = '\n📨 UNREAD MESSAGES\n';
+    output += '════════════════════════════════════════════════════════\n';
+    
+    let totalMessages = 0;
+    
+    for (const chat of chatMessages) {
+        totalMessages += chat.messages.length;
+        const chatType = chat.isGroup ? '👥 Group' : '👤 Individual';
+        output += `\n${chatType}: ${chat.chatName} (${chat.messages.length} messages)\n`;
+        output += '────────────────────────────────────────────────────────\n';
+        
+        // Sort messages by timestamp (oldest first)
+        const sortedMessages = chat.messages.sort((a, b) => a.timestamp - b.timestamp);
+        
+        for (const msg of sortedMessages) {
+            const time = msg.timestamp.toLocaleString();
+            const sender = msg.isGroup ? msg.author.split('@')[0] : 'Direct';
+            const preview = msg.body.length > 50 ? msg.body.substring(0, 50) + '...' : msg.body;
+            
+            output += `📅 ${time}\n`;
+            output += `👤 ${sender}: ${preview}\n`;
+            if (msg.hasMedia) {
+                output += `📎 [Contains media]\n`;
+            }
+            output += '\n';
+        }
+    }
+    
+    output += `\n📊 Total: ${totalMessages} unread messages from ${chatMessages.length} chats`;
+    
+    return output;
+}
+
 async function startBot() {
     console.log('🚀 Starting WhatsApp Task Listener...');
     await initDatabase();
+    await initBotSession();
     startHealthMonitoring();
     
     // Check if session exists
