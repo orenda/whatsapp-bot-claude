@@ -1425,7 +1425,7 @@ async function promptChatSelection(chats) {
     });
 }
 
-async function processchatSelection(selection, chats) {
+async function processChatSelection(selection, chats) {
     let selectedChats = [];
     
     if (selection === 'skip') {
@@ -1498,7 +1498,7 @@ async function runChatSelectionInit() {
     
     // Prompt user for selection
     const selection = await promptChatSelection(chatList);
-    const result = await processchatSelection(selection, chatList);
+    const result = await processChatSelection(selection, chatList);
     
     // Save configuration
     await saveChatSelectionConfig({
