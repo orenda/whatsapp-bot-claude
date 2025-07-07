@@ -82,7 +82,11 @@ DB_PASSWORD=your_postgres_password_here
 
 # Dashboard Configuration
 DASHBOARD_PORT=3000
+# Message Retrieval
+MESSAGE_FETCH_LIMIT=50
 ```
+
+`MESSAGE_FETCH_LIMIT` sets how many messages to request at a time when scanning chats for unread history. Increase it to search further back.
 
 ### Required API Keys
 
