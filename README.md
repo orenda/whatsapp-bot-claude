@@ -83,7 +83,11 @@ DB_PASSWORD=your_postgres_password_here
 
 # Dashboard Configuration
 DASHBOARD_PORT=3000
+
+# Message History
+MAX_MESSAGE_HISTORY_DAYS=3
 ```
+
 
 `MAX_MESSAGE_HISTORY_DAYS` controls how many days of messages the bot looks back when running the `/read_unread` command.
 
@@ -116,6 +120,11 @@ Use these commands in your designated "Bot Commands" chat:
 - `/monitor <number>` - Start monitoring a chat
 - `/unmonitor <number>` - Stop monitoring a chat
 - `/refresh` - Refresh chat discovery
+
+**Message History:**
+- `/read_unread [days]` - List unread messages from the last N days (default history window)
+- `/mark_read` - Mark all messages as read and update the timestamp
+- `/status` - Show bot login info and monitoring status
 
 **Dashboard & Help:**
 - `/dashboard` - Get secure mobile dashboard link
