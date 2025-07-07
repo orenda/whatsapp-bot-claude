@@ -11,6 +11,11 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 let MONITORED_CHATS = process.env.MONITORED_CHATS?.split(',') || ['Test Group'];
 const BOT_COMMAND_CHAT = process.env.BOT_COMMAND_CHAT || 'Bot Commands';
 const MAX_MESSAGE_HISTORY_DAYS = parseInt(process.env.MAX_MESSAGE_HISTORY_DAYS) || 3;
+const MESSAGE_FETCH_LIMIT = parseInt(process.env.MESSAGE_FETCH_LIMIT) || 50;
+// Store discovered chats for management
+let discoveredChats = new Map();
+
+
 // PostgreSQL connection
 const pool = new Pool({
     user: process.env.DB_USER || 'whatsapp_bot',
@@ -1567,7 +1572,7 @@ async function getMonitoredChats() {
     }
 }
 
-async function getMessagesFromChat(chatId, fromTimestamp, maxDays = null) {
+async function getMessagesFromChat(chatId, fromTimestamp, maxDays = null, fetchLimit = MESSAGE_FETCH_LIMIT) {
     try {
         const chat = await client.getChatById(chatId);
         if (!chat) {
@@ -1584,15 +1589,25 @@ async function getMessagesFromChat(chatId, fromTimestamp, maxDays = null) {
             }
         }
         
-        // Fetch messages with a reasonable limit
-        const messages = await chat.fetchMessages({ limit: 50 });
-        
-        // Filter messages by timestamp
-        const filteredMessages = messages.filter(msg => {
+        // Loop fetching messages until we encounter one older than earliestTimestamp
+        let limit = fetchLimit;
+        let messages = await chat.fetchMessages({ limit });
+        let filteredMessages = messages.filter(msg => {
             const messageDate = new Date(msg.timestamp * 1000);
             return messageDate >= earliestTimestamp;
         });
-        
+
+        // Increase limit and refetch while all messages are within the time window
+        // and more messages may be available
+        while (filteredMessages.length === messages.length && messages.length === limit) {
+            limit += fetchLimit;
+            messages = await chat.fetchMessages({ limit });
+            filteredMessages = messages.filter(msg => {
+                const messageDate = new Date(msg.timestamp * 1000);
+                return messageDate >= earliestTimestamp;
+            });
+        }
+
         // Format messages for display
         return filteredMessages.map(msg => ({
             id: msg.id._serialized,
@@ -1634,7 +1649,7 @@ async function getUnreadMessages(maxDays = null) {
         
         for (const chatConfig of monitoredChats) {
             console.log(`   📱 Checking ${chatConfig.chat_name}...`);
-            const messages = await getMessagesFromChat(chatConfig.chat_id, lastReadTimestamp, maxDays);
+            const messages = await getMessagesFromChat(chatConfig.chat_id, lastReadTimestamp, maxDays, MESSAGE_FETCH_LIMIT);
             
             if (messages.length > 0) {
                 console.log(`   ✅ Found ${messages.length} messages in ${chatConfig.chat_name}`);
