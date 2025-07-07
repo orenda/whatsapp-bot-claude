@@ -12,6 +12,11 @@ let MONITORED_CHATS = process.env.MONITORED_CHATS?.split(',') || ['Test Group'];
 const BOT_COMMAND_CHAT = process.env.BOT_COMMAND_CHAT || 'Bot Commands';
 const MAX_MESSAGE_HISTORY_DAYS = parseInt(process.env.MAX_MESSAGE_HISTORY_DAYS) || 3;
 const MESSAGE_FETCH_LIMIT = parseInt(process.env.MESSAGE_FETCH_LIMIT) || 50;
+
+// Session management configuration
+const SESSION_CLEAR_THRESHOLD = parseInt(process.env.SESSION_CLEAR_THRESHOLD) || 3; // Clear session after 3 failed attempts
+const AUTO_CLEAR_SESSION = process.env.AUTO_CLEAR_SESSION !== 'false'; // Allow disabling auto-clear
+const SESSION_RETRY_DELAY = parseInt(process.env.SESSION_RETRY_DELAY) || 3000; // Delay between retries
 // Store discovered chats for management
 let discoveredChats = new Map();
 
@@ -32,6 +37,107 @@ let healthCheckInterval;
 let connectionTimeout;
 let reconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 3;
+
+// Session management variables
+let sessionClearAttempts = 0;
+let lastSuccessfulConnection = null;
+
+// Session validation and management functions
+function isSessionHealthy() {
+    const fs = require('fs');
+    const path = require('path');
+    
+    try {
+        const sessionPath = './.wwebjs_auth';
+        
+        // Check if session directory exists
+        if (!fs.existsSync(sessionPath)) {
+            console.log('📝 No session directory found');
+            return false;
+        }
+        
+        // Check if session has essential files
+        const sessionFiles = fs.readdirSync(sessionPath);
+        if (sessionFiles.length === 0) {
+            console.log('📝 Session directory is empty');
+            return false;
+        }
+        
+        // Check session age (consider stale if older than 30 days)
+        const sessionStats = fs.statSync(sessionPath);
+        const sessionAge = Date.now() - sessionStats.mtime.getTime();
+        const maxSessionAge = 30 * 24 * 60 * 60 * 1000; // 30 days
+        
+        if (sessionAge > maxSessionAge) {
+            console.log(`📝 Session is ${Math.floor(sessionAge / (24 * 60 * 60 * 1000))} days old (stale)`);
+            return false;
+        }
+        
+        console.log(`📝 Session appears healthy (${Math.floor(sessionAge / (24 * 60 * 60 * 1000))} days old)`);
+        return true;
+        
+    } catch (error) {
+        console.log(`📝 Session health check failed: ${error.message}`);
+        return false;
+    }
+}
+
+function shouldClearSession() {
+    if (!AUTO_CLEAR_SESSION) {
+        console.log('📝 Auto session clearing is disabled');
+        return false;
+    }
+    
+    if (sessionClearAttempts >= SESSION_CLEAR_THRESHOLD) {
+        console.log(`📝 Session clear threshold reached (${sessionClearAttempts}/${SESSION_CLEAR_THRESHOLD})`);
+        return true;
+    }
+    
+    // Check if we've had recent successful connections
+    if (lastSuccessfulConnection) {
+        const timeSinceSuccess = Date.now() - lastSuccessfulConnection;
+        const maxTimeWithoutSuccess = 24 * 60 * 60 * 1000; // 24 hours
+        
+        if (timeSinceSuccess > maxTimeWithoutSuccess) {
+            console.log('📝 No successful connection in 24 hours, session may be corrupted');
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+async function clearSessionSafely() {
+    const fs = require('fs');
+    
+    try {
+        if (fs.existsSync('./.wwebjs_auth')) {
+            console.log('🗑️  Clearing session after validation...');
+            
+            // Create backup before clearing (optional safety measure)
+            const backupPath = `./.wwebjs_auth_backup_${Date.now()}`;
+            try {
+                fs.cpSync('./.wwebjs_auth', backupPath, { recursive: true });
+                console.log(`💾 Session backed up to ${backupPath}`);
+            } catch (backupError) {
+                console.log('📝 Could not create session backup');
+            }
+            
+            // Clear the session
+            fs.rmSync('./.wwebjs_auth', { recursive: true, force: true });
+            console.log('✅ Session directory cleared');
+            
+            // Reset session-related counters
+            sessionClearAttempts = 0;
+            reconnectAttempts = 0;
+            
+        } else {
+            console.log('📝 No session to clear');
+        }
+    } catch (error) {
+        console.log(`📝 Session cleanup completed with warnings: ${error.message}`);
+    }
+}
 
 // Initialize database
 async function initDatabase() {
@@ -389,21 +495,34 @@ async function restartConnection() {
             console.log('📝 Browser cleanup completed');
         }
         
-        // Clear session if multiple failures or on first connection error
-        if (reconnectAttempts >= 1) {
-            const fs = require('fs');
-            if (fs.existsSync('./.wwebjs_auth')) {
-                console.log('🗑️  Clearing potentially corrupted session...');
-                try {
-                    fs.rmSync('./.wwebjs_auth', { recursive: true, force: true });
-                    console.log('✅ Session directory cleared');
-                } catch (fsError) {
-                    console.log('📝 Session cleanup completed');
+        // Increment session clear attempts (but don't immediately clear)
+        sessionClearAttempts++;
+        
+        // Only clear session after proper validation and threshold
+        if (shouldClearSession()) {
+            const sessionHealthy = isSessionHealthy();
+            
+            if (!sessionHealthy) {
+                console.log('🔍 Session validation failed, clearing...');
+                await clearSessionSafely();
+            } else {
+                console.log('🔍 Session appears healthy, keeping it and trying different approach...');
+                
+                // Try alternative recovery methods without clearing session
+                console.log('💡 Attempting session recovery without clearing...');
+                
+                // Reset some counters to give session another chance
+                if (sessionClearAttempts > 1) {
+                    sessionClearAttempts = Math.max(1, sessionClearAttempts - 1);
+                    console.log(`📝 Reduced session clear attempts to ${sessionClearAttempts}`);
                 }
             }
+        } else {
+            console.log(`📝 Keeping session (attempt ${sessionClearAttempts}/${SESSION_CLEAR_THRESHOLD})`);
         }
         
-        // Wait longer before reinitializing to ensure cleanup is complete
+        // Wait before reinitializing to ensure cleanup is complete
+        const retryDelay = Math.min(SESSION_RETRY_DELAY * sessionClearAttempts, 15000); // Progressive delay, max 15s
         setTimeout(() => {
             console.log('🚀 Reinitializing WhatsApp client...');
             startConnectionTimeout(); // Restart timeout for new attempt
@@ -411,9 +530,9 @@ async function restartConnection() {
                 client.initialize();
             } catch (initError) {
                 console.error('❌ Failed to reinitialize:', initError.message);
-                setTimeout(() => restartConnection(), 15000); // Wait longer on failure
+                setTimeout(() => restartConnection(), retryDelay * 2); // Wait longer on failure
             }
-        }, 8000); // Increased delay to ensure cleanup
+        }, retryDelay);
     } catch (error) {
         console.error('❌ Error during restart:', error.message);
         setTimeout(() => restartConnection(), 15000); // Wait longer on error
@@ -465,6 +584,8 @@ client.on('auth_failure', (msg) => {
 client.on('ready', async () => {
     clearConnectionTimeout();
     reconnectAttempts = 0; // Reset on successful connection
+    sessionClearAttempts = 0; // Reset session clear attempts on success
+    lastSuccessfulConnection = Date.now(); // Track successful connection time
     
     console.log('✅ WhatsApp connected successfully!');
     console.log('📊 Monitored chats (task detection):', MONITORED_CHATS);
@@ -1099,6 +1220,18 @@ async function handleCommand(command, msg) {
                     return `❌ Error getting bot status: ${error.message}`;
                 }
                 
+            case '/clear_session':
+                try {
+                    const isHealthy = isSessionHealthy();
+                    await clearSessionSafely();
+                    return `✅ Session cleared manually!\n` +
+                           `📊 Session was ${isHealthy ? 'healthy' : 'unhealthy'} before clearing.\n` +
+                           `🔄 Bot will need to restart and show QR code.`;
+                } catch (error) {
+                    console.error('Error clearing session:', error);
+                    return `❌ Error clearing session: ${error.message}`;
+                }
+                
             case '/help':
                 return `🤖 WhatsApp Task Bot Commands\n\n` +
                        `📋 Task Commands:\n` +
@@ -1109,7 +1242,8 @@ async function handleCommand(command, msg) {
                        `📨 Message History:\n` +
                        `/read_unread [days] - Show unread messages since last read\n` +
                        `/mark_read - Mark all messages as read\n` +
-                       `/status - Show bot status and uptime\n\n` +
+                       `/status - Show bot status and uptime\n` +
+                       `/clear_session - Manually clear WhatsApp session (forces QR scan)\n\n` +
                        `📱 Dashboard & Chat Management:\n` +
                        `/dashboard - Get mobile dashboard link\n` +
                        `/chats - Show recent active chats (last 7 days)\n` +
@@ -1121,7 +1255,9 @@ async function handleCommand(command, msg) {
                        `🏗️ Setup:\n` +
                        `• Task Detection: ${MONITORED_CHATS.join(', ')}\n` +
                        `• Commands: ${BOT_COMMAND_CHAT} (this chat)\n` +
-                       `• Max History: ${MAX_MESSAGE_HISTORY_DAYS} days\n\n` +
+                       `• Max History: ${MAX_MESSAGE_HISTORY_DAYS} days\n` +
+                       `• Session Clear Threshold: ${SESSION_CLEAR_THRESHOLD} attempts\n` +
+                       `• Auto Clear: ${AUTO_CLEAR_SESSION ? 'Enabled' : 'Disabled'}\n\n` +
                        `ℹ️ The bot detects tasks from monitored chats.\n` +
                        `Use this dedicated chat for commands to avoid spam.`;
                 
@@ -1267,7 +1403,7 @@ process.on('unhandledRejection', (reason, promise) => {
     // Check if this is a protocol error that might indicate session corruption
     if (reason && reason.message && reason.message.includes('Protocol error')) {
         console.log('🔄 Protocol error detected, attempting restart...');
-        setTimeout(() => restartConnection(), 3000);
+        setTimeout(() => restartConnection(), SESSION_RETRY_DELAY);
     }
 });
 
@@ -1277,7 +1413,7 @@ process.on('uncaughtException', (error) => {
     // Check if this is a protocol error that might indicate session corruption
     if (error.message && error.message.includes('Protocol error')) {
         console.log('🔄 Protocol error detected, attempting restart...');
-        setTimeout(() => restartConnection(), 3000);
+        setTimeout(() => restartConnection(), SESSION_RETRY_DELAY);
     }
 });
 

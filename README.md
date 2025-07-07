@@ -92,6 +92,14 @@ MESSAGE_FETCH_LIMIT=50
 MAX_MESSAGE_HISTORY_DAYS=3
 `MAX_MESSAGE_HISTORY_DAYS` controls how many days of messages the bot looks back when running the `/read_unread` command.
 
+# Session Management
+SESSION_CLEAR_THRESHOLD=3
+AUTO_CLEAR_SESSION=true
+SESSION_RETRY_DELAY=3000
+`SESSION_CLEAR_THRESHOLD` controls how many failed connection attempts before clearing WhatsApp session (default: 3).
+`AUTO_CLEAR_SESSION` allows disabling automatic session clearing (set to false to never auto-clear).
+`SESSION_RETRY_DELAY` sets delay in milliseconds between connection retry attempts (default: 3000).
+
 
 ### Required API Keys
 
@@ -127,6 +135,7 @@ Use these commands in your designated "Bot Commands" chat:
 - `/read_unread [days]` - List unread messages from the last N days (default history window)
 - `/mark_read` - Mark all messages as read and update the timestamp
 - `/status` - Show bot login info and monitoring status
+- `/clear_session` - Manually clear WhatsApp session (forces QR scan)
 
 **Dashboard & Help:**
 - `/dashboard` - Get secure mobile dashboard link
