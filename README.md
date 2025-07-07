@@ -72,6 +72,7 @@ OPENAI_API_KEY=your_openai_api_key_here
 # WhatsApp Configuration
 MONITORED_CHATS=Work Team,Family Chat,Project Group
 BOT_COMMAND_CHAT=Bot Commands
+MAX_MESSAGE_HISTORY_DAYS=3
 
 # PostgreSQL Database Configuration
 DB_HOST=localhost
@@ -83,6 +84,8 @@ DB_PASSWORD=your_postgres_password_here
 # Dashboard Configuration
 DASHBOARD_PORT=3000
 ```
+
+`MAX_MESSAGE_HISTORY_DAYS` controls how many days of messages the bot looks back when running the `/read_unread` command.
 
 ### Required API Keys
 
