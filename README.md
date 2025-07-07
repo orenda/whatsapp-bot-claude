@@ -100,6 +100,35 @@ SESSION_RETRY_DELAY=3000
 `AUTO_CLEAR_SESSION` allows disabling automatic session clearing (set to false to never auto-clear).
 `SESSION_RETRY_DELAY` sets delay in milliseconds between connection retry attempts (default: 3000).
 
+# Startup Behavior
+ALWAYS_VERIFY_CHATS=true
+AUTO_PROCESS_STARTUP_MESSAGES=true
+STARTUP_SCAN_TIMEOUT=60000
+`ALWAYS_VERIFY_CHATS` controls whether to always prompt for chat verification on startup (default: true).
+`AUTO_PROCESS_STARTUP_MESSAGES` enables automatic processing of unread messages on startup (default: true).
+`STARTUP_SCAN_TIMEOUT` sets timeout for startup message scanning in milliseconds (default: 60000).
+
+## 🚀 Startup Process
+
+The bot follows an enhanced initialization process on startup:
+
+### 1. **Chat Verification Phase**
+- Always prompts to verify monitored chats (unless `ALWAYS_VERIFY_CHATS=false`)
+- Shows current configuration and monitoring status
+- Options to keep settings, review/modify, or reconfigure completely
+- Interactive terminal-based chat selection with toggle functionality
+
+### 2. **Startup Message Processing** 
+- Automatically scans for unread messages since last session
+- Shows time since last read and message count preview
+- Options to process immediately, review summary first, or skip
+- Progress tracking with chat-by-chat scanning status
+- Automatic task detection on historical messages
+- Updates last read timestamp after processing
+
+### 3. **Live Monitoring**
+- Transitions to real-time message monitoring
+- Continues detecting tasks from new incoming messages
 
 ### Required API Keys
 

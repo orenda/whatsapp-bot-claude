@@ -17,6 +17,11 @@ const MESSAGE_FETCH_LIMIT = parseInt(process.env.MESSAGE_FETCH_LIMIT) || 50;
 const SESSION_CLEAR_THRESHOLD = parseInt(process.env.SESSION_CLEAR_THRESHOLD) || 3; // Clear session after 3 failed attempts
 const AUTO_CLEAR_SESSION = process.env.AUTO_CLEAR_SESSION !== 'false'; // Allow disabling auto-clear
 const SESSION_RETRY_DELAY = parseInt(process.env.SESSION_RETRY_DELAY) || 3000; // Delay between retries
+
+// Startup behavior configuration
+const ALWAYS_VERIFY_CHATS = process.env.ALWAYS_VERIFY_CHATS !== 'false'; // Always ask to verify chats on startup
+const AUTO_PROCESS_STARTUP_MESSAGES = process.env.AUTO_PROCESS_STARTUP_MESSAGES !== 'false'; // Process unread messages on startup
+const STARTUP_SCAN_TIMEOUT = parseInt(process.env.STARTUP_SCAN_TIMEOUT) || 60000; // Timeout for startup message scanning
 // Store discovered chats for management
 let discoveredChats = new Map();
 
@@ -1645,26 +1650,439 @@ async function runChatSelectionInit() {
     return result;
 }
 
-async function checkAndRunInitialization() {
+async function runChatSelectionReview() {
+    console.log('\n🔍 Discovering available chats...');
+    
+    // Get current chats and monitored status
+    const chats = await client.getChats();
+    const chatList = chats.map(chat => ({
+        id: chat.id._serialized,
+        name: chat.name || 'Unknown',
+        isGroup: chat.isGroup,
+        participantCount: chat.isGroup ? (chat.participants ? chat.participants.length : 0) : 1
+    }));
+    
+    // Get current monitoring status from database
+    const monitoredChats = await getMonitoredChats();
+    const monitoredIds = new Set(monitoredChats.map(chat => chat.chat_id));
+    
+    console.log(`📊 Found ${chatList.length} total chats\n`);
+    
+    // Show chats with current monitoring status
+    console.log('🔧 CHAT REVIEW & MODIFICATION');
+    console.log('════════════════════════════');
+    console.log('Current status for each chat:\n');
+    
+    chatList.forEach((chat, index) => {
+        const type = chat.isGroup ? '👥 Group' : '👤 Individual';
+        const participants = chat.isGroup ? ` (${chat.participantCount} members)` : '';
+        const status = monitoredIds.has(chat.id) ? '✅ MONITORED' : '❌ Not monitored';
+        console.log(`${index + 1}. ${type}: ${chat.name}${participants} - ${status}`);
+    });
+    
+    const rl = createReadlineInterface();
+    
+    return new Promise(async (resolve) => {
+        rl.question('\n👉 Options:\n' +
+                   '   • Enter numbers to toggle monitoring (e.g., "1,3,5" to toggle chats 1, 3, and 5)\n' +
+                   '   • Enter "all" to monitor all chats\n' +
+                   '   • Enter "none" to disable all monitoring\n' +
+                   '   • Enter "groups" to monitor only group chats\n' +
+                   '   • Enter "done" to finish\n\n' +
+                   'Your choice: ', async (answer) => {
+            rl.close();
+            
+            const selection = answer.trim().toLowerCase();
+            
+            if (selection === 'done') {
+                console.log('✅ Chat review completed');
+                resolve();
+                return;
+            }
+            
+            try {
+                await processReviewSelection(selection, chatList, monitoredIds);
+                
+                // Save updated configuration
+                const newMonitoredCount = await getMonitoredChats();
+                await saveChatSelectionConfig({
+                    is_initialized: true,
+                    total_chats_discovered: chatList.length,
+                    monitored_chats_count: newMonitoredCount.length
+                });
+                
+                console.log('✅ Configuration updated successfully');
+            } catch (error) {
+                console.error('❌ Error updating configuration:', error.message);
+            }
+            
+            resolve();
+        });
+    });
+}
+
+async function processReviewSelection(selection, chats, currentMonitoredIds) {
+    if (selection === 'all') {
+        // Enable monitoring for all chats
+        await pool.query('UPDATE chat_configs SET is_monitored = true');
+        console.log(`✅ All ${chats.length} chats are now monitored`);
+        
+    } else if (selection === 'none') {
+        // Disable monitoring for all chats
+        await pool.query('UPDATE chat_configs SET is_monitored = false');
+        console.log('✅ All chat monitoring disabled');
+        
+    } else if (selection === 'groups') {
+        // Monitor only group chats
+        await pool.query('UPDATE chat_configs SET is_monitored = false');
+        const groupChats = chats.filter(chat => chat.isGroup);
+        for (const chat of groupChats) {
+            await pool.query(`
+                UPDATE chat_configs 
+                SET is_monitored = true, updated_at = NOW()
+                WHERE chat_id = $1
+            `, [chat.id]);
+        }
+        console.log(`✅ Now monitoring ${groupChats.length} group chats only`);
+        
+    } else {
+        // Parse comma-separated numbers to toggle specific chats
+        const numbers = selection.split(',')
+            .map(n => parseInt(n.trim()))
+            .filter(n => !isNaN(n) && n > 0 && n <= chats.length);
+        
+        if (numbers.length === 0) {
+            console.log('❌ No valid chat numbers provided');
+            return;
+        }
+        
+        // Toggle monitoring status for selected chats
+        for (const num of numbers) {
+            const chat = chats[num - 1];
+            const currentlyMonitored = currentMonitoredIds.has(chat.id);
+            const newStatus = !currentlyMonitored;
+            
+            await pool.query(`
+                UPDATE chat_configs 
+                SET is_monitored = $1, updated_at = NOW()
+                WHERE chat_id = $2
+            `, [newStatus, chat.id]);
+            
+            const action = newStatus ? 'enabled' : 'disabled';
+            const type = chat.isGroup ? '👥' : '👤';
+            console.log(`   ${type} ${chat.name}: monitoring ${action}`);
+        }
+    }
+}
+
+async function promptChatVerification() {
+    const rl = createReadlineInterface();
+    
+    console.log('\n🔧 CHAT MONITORING VERIFICATION');
+    console.log('═══════════════════════════════');
+    
+    return new Promise((resolve) => {
+        rl.question('\n👉 What would you like to do?\n' +
+                   '   1. Keep current chat settings and continue\n' +
+                   '   2. Review and modify monitored chats\n' +
+                   '   3. Reconfigure all chats from scratch\n' +
+                   '   4. Skip verification (use current settings)\n\n' +
+                   'Your choice (1-4): ', (answer) => {
+            rl.close();
+            const choice = parseInt(answer.trim());
+            resolve(choice >= 1 && choice <= 4 ? choice : 1);
+        });
+    });
+}
+
+async function showCurrentChatConfig() {
     const config = await getChatSelectionConfig();
+    const monitoredChats = await getMonitoredChats();
     
     if (!config || !config.is_initialized) {
-        console.log('\n🆕 First time setup detected');
-        console.log('🔧 Starting chat selection initialization...');
-        
-        // Wait for WhatsApp client to be ready
-        await new Promise(resolve => {
-            if (client.info) {
-                resolve();
-            } else {
-                client.once('ready', resolve);
-            }
+        console.log('📋 Current Status: No configuration found (first time setup)');
+        return false;
+    }
+    
+    console.log(`📊 Current Configuration:`);
+    console.log(`   • Total chats discovered: ${config.total_chats_discovered}`);
+    console.log(`   • Currently monitored: ${config.monitored_chats_count}`);
+    console.log(`   • Last updated: ${config.last_init_at ? new Date(config.last_init_at).toLocaleString() : 'Never'}`);
+    
+    if (monitoredChats.length > 0) {
+        console.log(`\n📱 Monitored Chats:`);
+        monitoredChats.forEach((chat, index) => {
+            const type = chat.is_group ? '👥 Group' : '👤 Individual';
+            const participants = chat.is_group ? ` (${chat.participant_count} members)` : '';
+            console.log(`   ${index + 1}. ${type}: ${chat.chat_name}${participants}`);
         });
-        
-        await runChatSelectionInit();
     } else {
-        console.log('✅ Chat selection already configured');
-        console.log(`📊 Monitoring ${config.monitored_chats_count} out of ${config.total_chats_discovered} chats`);
+        console.log('\n⚠️  No chats currently monitored');
+    }
+    
+    return true;
+}
+
+async function checkAndRunInitialization() {
+    if (!ALWAYS_VERIFY_CHATS) {
+        console.log('📝 Chat verification disabled, using existing configuration');
+        const config = await getChatSelectionConfig();
+        if (config && config.is_initialized) {
+            console.log(`📊 Using ${config.monitored_chats_count} monitored chats`);
+            return;
+        }
+    }
+    
+    // Wait for WhatsApp client to be ready
+    await new Promise(resolve => {
+        if (client.info) {
+            resolve();
+        } else {
+            client.once('ready', resolve);
+        }
+    });
+    
+    // Show current configuration
+    const hasConfig = await showCurrentChatConfig();
+    
+    // If no configuration exists, force setup
+    if (!hasConfig) {
+        console.log('\n🆕 First time setup required');
+        await runChatSelectionInit();
+        return;
+    }
+    
+    // Ask user what they want to do
+    const choice = await promptChatVerification();
+    
+    switch (choice) {
+        case 1: // Keep current settings
+            console.log('✅ Keeping current chat settings');
+            break;
+            
+        case 2: // Review and modify
+            console.log('🔧 Starting chat review and modification...');
+            await runChatSelectionReview();
+            break;
+            
+        case 3: // Reconfigure all
+            console.log('🔄 Reconfiguring all chats from scratch...');
+            await runChatSelectionInit();
+            break;
+            
+        case 4: // Skip verification
+            console.log('⏭️  Skipping verification, using current settings');
+            break;
+            
+        default:
+            console.log('✅ Using default option: keeping current settings');
+            break;
+    }
+    
+    // After chat verification, process startup messages if enabled
+    if (AUTO_PROCESS_STARTUP_MESSAGES) {
+        await processStartupMessages();
+    }
+}
+
+async function promptStartupMessageProcessing() {
+    const lastReadTimestamp = await getLastReadTimestamp();
+    
+    if (!lastReadTimestamp) {
+        console.log('\n📝 No previous read timestamp found, skipping startup message processing');
+        return false;
+    }
+    
+    const timeSinceLastRead = Date.now() - lastReadTimestamp.getTime();
+    const hoursSinceLastRead = Math.floor(timeSinceLastRead / (1000 * 60 * 60));
+    const daysSinceLastRead = Math.floor(hoursSinceLastRead / 24);
+    
+    console.log('\n📨 STARTUP MESSAGE PROCESSING');
+    console.log('═════════════════════════════');
+    console.log(`📅 Last read: ${lastReadTimestamp.toLocaleString()}`);
+    console.log(`⏰ Time since last read: ${daysSinceLastRead} days, ${hoursSinceLastRead % 24} hours`);
+    
+    if (daysSinceLastRead > MAX_MESSAGE_HISTORY_DAYS) {
+        console.log(`⚠️  Note: Will only scan last ${MAX_MESSAGE_HISTORY_DAYS} days due to MAX_MESSAGE_HISTORY_DAYS limit`);
+    }
+    
+    const rl = createReadlineInterface();
+    
+    return new Promise((resolve) => {
+        rl.question('\n👉 Would you like to process unread messages from monitored chats?\n' +
+                   '   1. Yes, scan and process all unread messages\n' +
+                   '   2. Yes, but show me a summary first\n' +
+                   '   3. No, skip startup message processing\n\n' +
+                   'Your choice (1-3): ', (answer) => {
+            rl.close();
+            const choice = parseInt(answer.trim());
+            resolve(choice >= 1 && choice <= 3 ? choice : 3);
+        });
+    });
+}
+
+async function processMessagesForTasks(messages, chatConfig) {
+    let detectedTasks = 0;
+    
+    for (const message of messages) {
+        try {
+            // Use existing task detection logic
+            const hasTaskIndicators = await detectTask(message.body);
+            
+            if (hasTaskIndicators) {
+                // Analyze with AI for task detection
+                const analysis = await analyzeMessageForTask(
+                    message.body,
+                    chatConfig.chat_name,
+                    message.author || message.from
+                );
+                
+                if (analysis && analysis.isTask) {
+                    // Save the detected task
+                    await saveTask({
+                        messageId: message.id,
+                        chatId: message.chatId,
+                        chatName: chatConfig.chat_name,
+                        senderName: message.author || message.from,
+                        originalText: message.body,
+                        analysis: analysis
+                    });
+                    
+                    detectedTasks++;
+                }
+            }
+            
+            // Mark message as processed
+            await markMessageProcessed(
+                message.id,
+                message.chatId,
+                hasTaskIndicators,
+                hasTaskIndicators
+            );
+            
+        } catch (error) {
+            console.log(`   ⚠️  Error processing message: ${error.message}`);
+        }
+    }
+    
+    return detectedTasks;
+}
+
+async function processStartupMessages() {
+    try {
+        const choice = await promptStartupMessageProcessing();
+        
+        if (choice === 3) {
+            console.log('⏭️  Skipping startup message processing');
+            return;
+        }
+        
+        console.log('\n🔍 Scanning for unread messages...');
+        
+        const monitoredChats = await getMonitoredChats();
+        if (monitoredChats.length === 0) {
+            console.log('⚠️  No monitored chats found, skipping message processing');
+            return;
+        }
+        
+        const lastReadTimestamp = await getLastReadTimestamp();
+        let totalMessages = 0;
+        let totalTasks = 0;
+        let processedChats = 0;
+        
+        console.log(`📊 Scanning ${monitoredChats.length} monitored chats...`);
+        
+        for (const chatConfig of monitoredChats) {
+            try {
+                console.log(`\n📱 [${processedChats + 1}/${monitoredChats.length}] Scanning: ${chatConfig.chat_name}`);
+                
+                const messages = await getMessagesFromChat(
+                    chatConfig.chat_id, 
+                    lastReadTimestamp, 
+                    MAX_MESSAGE_HISTORY_DAYS,
+                    MESSAGE_FETCH_LIMIT
+                );
+                
+                if (messages.length === 0) {
+                    console.log('   📭 No new messages');
+                } else {
+                    console.log(`   📨 Found ${messages.length} messages`);
+                    totalMessages += messages.length;
+                    
+                    if (choice === 1) {
+                        // Process messages for tasks
+                        const chatTasks = await processMessagesForTasks(messages, chatConfig);
+                        if (chatTasks > 0) {
+                            console.log(`   ✅ Detected ${chatTasks} tasks`);
+                            totalTasks += chatTasks;
+                        }
+                    }
+                }
+                
+                processedChats++;
+                
+                // Show progress
+                const progress = Math.round((processedChats / monitoredChats.length) * 100);
+                console.log(`   📈 Progress: ${progress}% (${processedChats}/${monitoredChats.length} chats)`);
+                
+            } catch (error) {
+                console.log(`   ❌ Error scanning ${chatConfig.chat_name}: ${error.message}`);
+            }
+        }
+        
+        // Show final summary
+        console.log('\n📊 STARTUP SCAN SUMMARY');
+        console.log('═══════════════════════');
+        console.log(`📨 Total messages found: ${totalMessages}`);
+        console.log(`📱 Chats scanned: ${processedChats}/${monitoredChats.length}`);
+        
+        if (choice === 1) {
+            console.log(`🎯 Tasks detected: ${totalTasks}`);
+            
+            if (totalMessages > 0) {
+                // Update last read timestamp
+                await updateLastReadTimestamp();
+                console.log('✅ Last read timestamp updated');
+            }
+        } else if (choice === 2 && totalMessages > 0) {
+            // Show summary and ask if user wants to process
+            const rl = createReadlineInterface();
+            
+            const shouldProcess = await new Promise((resolve) => {
+                rl.question(`\n👉 Found ${totalMessages} unread messages. Process them for tasks? (y/n): `, (answer) => {
+                    rl.close();
+                    resolve(answer.trim().toLowerCase().startsWith('y'));
+                });
+            });
+            
+            if (shouldProcess) {
+                console.log('\n🔄 Processing messages for task detection...');
+                
+                for (const chatConfig of monitoredChats) {
+                    const messages = await getMessagesFromChat(
+                        chatConfig.chat_id, 
+                        lastReadTimestamp, 
+                        MAX_MESSAGE_HISTORY_DAYS,
+                        MESSAGE_FETCH_LIMIT
+                    );
+                    
+                    if (messages.length > 0) {
+                        const chatTasks = await processMessagesForTasks(messages, chatConfig);
+                        totalTasks += chatTasks;
+                    }
+                }
+                
+                console.log(`✅ Processing complete! Detected ${totalTasks} tasks total`);
+                await updateLastReadTimestamp();
+                console.log('✅ Last read timestamp updated');
+            }
+        }
+        
+        console.log('\n🚀 Startup processing complete, beginning live monitoring...\n');
+        
+    } catch (error) {
+        console.error('❌ Error during startup message processing:', error.message);
+        console.log('🔄 Continuing with live monitoring...\n');
     }
 }
 
