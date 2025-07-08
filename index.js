@@ -616,14 +616,19 @@ client.on('ready', async () => {
         
         // Test getting chats with timeout protection
         console.log('🔍 Testing chat access...');
-        const chats = await Promise.race([
-            client.getChats(),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Chat access timeout')), 30000))
-        ]);
-        console.log(`📱 Found ${chats.length} chats accessible`);
+        try {
+            const chats = await Promise.race([
+                client.getChats(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('Chat access timeout')), 60000))
+            ]);
+            console.log(`📱 Found ${chats.length} chats accessible`);
+        } catch (error) {
+            console.error('❌ Chat access failed:', error.message);
+            console.log('⚠️  Proceeding with initialization anyway...');
+        }
         
-        // Discover chats after a longer delay to ensure stability
-        console.log('⏳ Starting chat discovery in 10 seconds...');
+        // Always run initialization after a delay, regardless of chat access
+        console.log('⏳ Starting initialization in 10 seconds...');
         setTimeout(async () => {
             try {
                 console.log('🔍 Beginning chat discovery...');
@@ -633,18 +638,25 @@ client.on('ready', async () => {
                 ]);
                 await refreshMonitoredChats();
                 console.log('✅ Chat discovery completed successfully');
-                
-                // Run chat selection initialization
-                await checkAndRunInitialization();
             } catch (error) {
-                console.error('❌ Error during initial chat discovery:', error.message);
-                console.log('🔄 Chat discovery will be retried on next restart');
+                console.error('❌ Error during chat discovery:', error.message);
+                console.log('⚠️  Proceeding with initialization anyway...');
             }
+            
+            // ALWAYS run initialization, even if chat discovery fails
+            console.log('🔄 DEBUG: About to call checkAndRunInitialization()');
+            await checkAndRunInitialization();
         }, 10000);
         
     } catch (error) {
         console.error('❌ Error getting account info:', error.message);
-        console.log('🔄 Will retry operations after connection stabilizes');
+        console.log('⚠️  Running initialization fallback...');
+        
+        // Fallback: run initialization even if everything else fails
+        setTimeout(async () => {
+            console.log('🔄 DEBUG: Fallback initialization triggered');
+            await checkAndRunInitialization();
+        }, 15000);
     }
 });
 
@@ -1321,6 +1333,7 @@ client.on('message', async msg => {
 
         const chat = await msg.getChat();
         const chatName = chat.name || msg.from;
+        console.log(`🔄 DEBUG: Message from chat: "${chatName}" | BOT_COMMAND_CHAT: "${BOT_COMMAND_CHAT}"`);
 
         // Check if this is the dedicated command chat
         const isCommandChat = chatName.includes(BOT_COMMAND_CHAT);
@@ -1620,20 +1633,41 @@ async function processChatSelection(selection, chats) {
 async function runChatSelectionInit() {
     console.log('\n🔍 Discovering available chats...');
     
-    // Wait for WhatsApp to be ready and discover chats
-    const chats = await client.getChats();
-    const chatList = chats.map(chat => ({
-        id: chat.id._serialized,
-        name: chat.name || 'Unknown',
-        isGroup: chat.isGroup,
-        participantCount: chat.isGroup ? (chat.participants ? chat.participants.length : 0) : 1
-    }));
+    let chatList = [];
     
-    console.log(`📊 Found ${chatList.length} chats`);
-    
-    // Save all discovered chats to database
-    for (const chat of chatList) {
-        await saveChatConfig(chat);
+    try {
+        // Wait for WhatsApp to be ready and discover chats with timeout
+        console.log('🔄 DEBUG: Attempting to get chats...');
+        const chats = await Promise.race([
+            client.getChats(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Chat discovery timeout')), 30000))
+        ]);
+        console.log('🔄 DEBUG: Successfully got chats');
+        chatList = chats.map(chat => ({
+            id: chat.id._serialized,
+            name: chat.name || 'Unknown',
+            isGroup: chat.isGroup,
+            participantCount: chat.isGroup ? (chat.participants ? chat.participants.length : 0) : 1
+        }));
+        
+        console.log(`📊 Found ${chatList.length} chats`);
+        
+        // Save all discovered chats to database
+        for (const chat of chatList) {
+            await saveChatConfig(chat);
+        }
+    } catch (error) {
+        console.error('❌ Chat discovery failed:', error.message);
+        console.log('⚠️  Using fallback: manual chat configuration');
+        
+        // Fallback: use current environment variable settings
+        chatList = MONITORED_CHATS.map((name, index) => ({
+            id: `fallback_${index}`,
+            name: name,
+            isGroup: true,
+            participantCount: 0
+        }));
+        console.log(`📊 Using ${chatList.length} chats from environment: ${MONITORED_CHATS.join(', ')}`);
     }
     
     // Prompt user for selection
@@ -1776,6 +1810,7 @@ async function processReviewSelection(selection, chats, currentMonitoredIds) {
 }
 
 async function promptChatVerification() {
+    console.log('🔄 DEBUG: promptChatVerification() called');
     const rl = createReadlineInterface();
     
     console.log('\n🔧 CHAT MONITORING VERIFICATION');
@@ -1824,6 +1859,7 @@ async function showCurrentChatConfig() {
 }
 
 async function checkAndRunInitialization() {
+    console.log('🔄 DEBUG: checkAndRunInitialization() called');
     if (!ALWAYS_VERIFY_CHATS) {
         console.log('📝 Chat verification disabled, using existing configuration');
         const config = await getChatSelectionConfig();
@@ -1849,34 +1885,34 @@ async function checkAndRunInitialization() {
     if (!hasConfig) {
         console.log('\n🆕 First time setup required');
         await runChatSelectionInit();
-        return;
-    }
-    
-    // Ask user what they want to do
-    const choice = await promptChatVerification();
-    
-    switch (choice) {
-        case 1: // Keep current settings
-            console.log('✅ Keeping current chat settings');
-            break;
-            
-        case 2: // Review and modify
-            console.log('🔧 Starting chat review and modification...');
-            await runChatSelectionReview();
-            break;
-            
-        case 3: // Reconfigure all
-            console.log('🔄 Reconfiguring all chats from scratch...');
-            await runChatSelectionInit();
-            break;
-            
-        case 4: // Skip verification
-            console.log('⏭️  Skipping verification, using current settings');
-            break;
-            
-        default:
-            console.log('✅ Using default option: keeping current settings');
-            break;
+        // Skip chat verification prompts for first-time setup
+    } else {
+        // Ask user what they want to do (only for existing configurations)
+        const choice = await promptChatVerification();
+        
+        switch (choice) {
+            case 1: // Keep current settings
+                console.log('✅ Keeping current chat settings');
+                break;
+                
+            case 2: // Review and modify
+                console.log('🔧 Starting chat review and modification...');
+                await runChatSelectionReview();
+                break;
+                
+            case 3: // Reconfigure all
+                console.log('🔄 Reconfiguring all chats from scratch...');
+                await runChatSelectionInit();
+                break;
+                
+            case 4: // Skip verification
+                console.log('⏭️  Skipping verification, using current settings');
+                break;
+                
+            default:
+                console.log('✅ Using default option: keeping current settings');
+                break;
+        }
     }
     
     // After chat verification, process startup messages if enabled
@@ -1927,17 +1963,13 @@ async function processMessagesForTasks(messages, chatConfig) {
     for (const message of messages) {
         try {
             // Use existing task detection logic
-            const hasTaskIndicators = await detectTask(message.body);
+            const hasIndicators = hasTaskIndicators(message.body);
             
-            if (hasTaskIndicators) {
+            if (hasIndicators) {
                 // Analyze with AI for task detection
-                const analysis = await analyzeMessageForTask(
-                    message.body,
-                    chatConfig.chat_name,
-                    message.author || message.from
-                );
+                const analysis = await detectTask(message);
                 
-                if (analysis && analysis.isTask) {
+                if (analysis && analysis.is_task) {
                     // Save the detected task
                     await saveTask({
                         messageId: message.id,
@@ -1956,8 +1988,8 @@ async function processMessagesForTasks(messages, chatConfig) {
             await markMessageProcessed(
                 message.id,
                 message.chatId,
-                hasTaskIndicators,
-                hasTaskIndicators
+                hasIndicators,
+                hasIndicators
             );
             
         } catch (error) {
